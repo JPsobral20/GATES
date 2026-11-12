@@ -1,0 +1,198 @@
+import streamlit as st
+import json
+import pandas as pd
+import os
+
+# ==========================================
+# 1. PAGE SETUP (Wide Layout)
+# ==========================================
+st.set_page_config(layout="wide", page_title="Neuro-Symbolic Clinical Dashboard")
+
+# Custom CSS
+st.markdown("""
+<style>
+    .evidence-box {
+        background-color: #1e293b; 
+        border-left: 5px solid #0ea5e9; 
+        padding: 15px;
+        border-radius: 5px;
+        margin-top: 20px;
+        color: #f8fafc; 
+    }
+    .summary-box {
+        background-color: #f0fdf4; 
+        border-left: 5px solid #16a34a; 
+        padding: 15px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        color: #0f172a;
+        font-size: 1.1em;
+        line-height: 1.6;
+    }
+    .metric-badge {
+        background-color: #064e3b; 
+        color: #a7f3d0; 
+        padding: 5px 10px;
+        border-radius: 10px;
+        font-weight: bold;
+    }
+    .status-active { background-color: #ef4444; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
+    .status-resolved { background-color: #f59e0b; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
+    .status-negated { background-color: #64748b; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
+    .status-unknown { background-color: #334155; color: white; padding: 3px 8px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 2. FILE RESOLUTION & DATA LOADING
+# ==========================================
+def get_latest_run_dir(base_dir):
+    """Encontra a pasta com a timestamp mais recente dentro de um diretório base."""
+    if not os.path.exists(base_dir):
+        return None
+    subdirs = [os.path.join(base_dir, d) for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    if not subdirs:
+        return None
+    return max(subdirs, key=lambda x: os.path.basename(x))
+
+@st.cache_data
+def load_graph_data(file_path):
+    if not file_path or not os.path.exists(file_path):
+        return None
+    with open(file_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def get_specific_summary(summary_base_dir, patient_id, provider_name):
+    """
+    Procura o sumário de um paciente específico gerado por uma LLM específica.
+    """
+    if not summary_base_dir:
+        return None
+        
+    provider_folder = provider_name.lower()
+    provider_path = os.path.join(summary_base_dir, provider_folder)
+    
+    if not os.path.exists(provider_path):
+        return None
+
+    # Remove o '.txt' do patient_id (ex: "report_1.txt" passa a "report_1")
+    base_patient_id = patient_id.replace(".txt", "")
+    
+    # Constrói o NOME EXATO do ficheiro esperado (ex: "report_1_google.txt")
+    expected_filename = f"{base_patient_id}_{provider_folder}.txt"
+    file_path = os.path.join(provider_path, expected_filename)
+    
+    # Verifica se esse ficheiro exato existe e lê o texto
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+            
+    return None
+
+# Resolver caminhos
+latest_graph_dir = get_latest_run_dir("./outputs/it3_graphs")
+latest_graph_file = os.path.join(latest_graph_dir, "master_timeline.json") if latest_graph_dir else None
+
+latest_summary_dir = get_latest_run_dir("./outputs/it3_summaries")
+
+# Carregar Grafo
+graph_data = load_graph_data(latest_graph_file)
+
+# ==========================================
+# 3. USER INTERFACE
+# ==========================================
+st.title("🏥 Clinical Verification Interface")
+st.markdown("Select a patient and a Large Language Model to audit the generated summary against the extracted Knowledge Graph.")
+
+if not graph_data:
+    st.error("❌ Could not automatically find 'master_timeline.json'.")
+else:
+    # --- SIDEBAR CONTROLS ---
+    st.sidebar.header("Control Panel")
+    
+    patient_list = list(graph_data.keys())
+    selected_patient = st.sidebar.selectbox("1. Select Clinical Note", patient_list)
+    
+    # NOVO: Seleção do Modelo LLM
+    available_llms = ["Google", "Nebius", "OpenAI"]
+    selected_llm = st.sidebar.selectbox("2. Select LLM Provider", available_llms)
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info(f"📁 **Graph Source:**\n`{os.path.basename(latest_graph_dir)}`")
+    st.sidebar.info(f"📁 **Summary Source:**\n`{os.path.basename(latest_summary_dir)}`")
+    
+    # --- SECTION 1: THE FINAL SUMMARY ---
+    st.subheader(f"📝 Hallucination-Free Clinical Summary ({selected_llm})")
+    
+    # Vai buscar apenas o sumário da LLM escolhida
+    summary_text = get_specific_summary(latest_summary_dir, selected_patient, selected_llm)
+    
+    if summary_text:
+        st.markdown(f'<div class="summary-box">{summary_text}</div>', unsafe_allow_html=True)
+    else:
+        st.warning(f"No summary found for **{selected_patient}** generated by **{selected_llm}** in the folder `{latest_summary_dir}/{selected_llm.lower()}`.")
+    
+    st.markdown("---")
+    
+    # --- SECTION 2: THE GRAPH AUDITOR ---
+    patient_facts = graph_data[selected_patient]
+    
+    if not patient_facts:
+        st.warning(f"The Knowledge Graph for {selected_patient} contains no extracted relations.")
+    else:
+        df = pd.DataFrame(patient_facts)
+        
+        col1, col2 = st.columns([3, 2])
+        
+        with col1:
+            st.subheader("📊 Graph Relationships (Truth Anchor)")
+            st.write("Select a row below to audit the evidence.")
+            
+            if 'status' not in df.columns:
+                df['status'] = 'Unknown'
+                
+            view_df = df[['date_time', 'subject', 'relation', 'object', 'status']]
+            view_df.columns = ['Time / Date', 'Subject', 'Relationship', 'Medical Object', 'Status']
+            
+            selected_rows = st.dataframe(
+                view_df, 
+                use_container_width=True,
+                hide_index=True,
+                selection_mode="single-row",
+                on_select="rerun"
+            )
+            
+        with col2:
+            st.subheader("🔍 Evidence Auditor")
+            
+            if len(selected_rows.selection['rows']) > 0:
+                selected_index = selected_rows.selection['rows'][0]
+                fact = patient_facts[selected_index]
+                
+                raw_status = str(fact.get('status', 'Unknown'))
+                status_class = f"status-{raw_status.lower()}"
+                
+                st.success(f"**Verification Status:** Relation `{fact.get('relation', '')}` is fully grounded.")
+                
+                st.markdown(f"""
+                <div class="evidence-box">
+                    <h4>Structured Triple:</h4>
+                    <ul>
+                        <li><strong>Entity A (Subject):</strong> {fact.get('subject', '')}</li>
+                        <li><strong>Predicate (Relation):</strong> {fact.get('relation', '')}</li>
+                        <li><strong>Entity B (Object):</strong> <span class="metric-badge">{fact.get('object', '')}</span></li>
+                        <li><strong>Clinical Status:</strong> <span class="{status_class}">{raw_status}</span></li>
+                        <li><strong>Temporal Anchor:</strong> {fact.get('date_time', '')}</li>
+                    </ul>
+                    <hr>
+                    <h4>Grounded Evidence (Raw Text Quote):</h4>
+                    <p><i>"{fact.get('evidence', 'No evidence provided.')}"</i></p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+            else:
+                st.info("👈 Select a relationship row from the table on the left to reveal the exact source sentence supporting the extraction.")
+
+# Footer
+st.markdown("---")
+st.caption("Research Project: Enhancing Clinical Summarization through Knowledge Graph Grounding and Timeline Visualization - FEUP 2026")
